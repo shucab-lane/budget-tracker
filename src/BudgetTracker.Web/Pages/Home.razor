@@ -1,0 +1,352 @@
+﻿@page "/"
+@using BudgetTracker.Core
+@using BudgetTracker.Web.Services
+@using System.Globalization
+@inject BudgetService Budget
+@inject LocalStore Store
+@inject IJSRuntime JS
+@implements IDisposable
+
+<PageTitle>Budget Tracker</PageTitle>
+
+<header class="topbar">
+    <div class="brand"><span class="logo">$</span> Budget Tracker</div>
+    <div class="month-nav">
+        <button class="icon" title="Previous month" @onclick="() => ChangeMonth(-1)">‹</button>
+        <span>@MonthLabel</span>
+        <button class="icon" title="Next month" @onclick="() => ChangeMonth(1)">›</button>
+    </div>
+</header>
+
+<main>
+    <section class="cards">
+        <div class="card stat">
+            <span>Income</span>
+            <b class="pos">@Money(summary.Income)</b>
+        </div>
+        <div class="card stat">
+            <span>Spent</span>
+            <b>@Money(summary.Expenses)</b>
+        </div>
+        <div class="card stat">
+            <span>Left over</span>
+            <b class="@(summary.Net >= 0 ? "pos" : "neg")">@Money(summary.Net)</b>
+        </div>
+        <div class="card stat">
+            <span>Over budget</span>
+            <b class="@(overBudget > 0 ? "neg" : "")">@overBudget @(overBudget == 1 ? "category" : "categories")</b>
+        </div>
+    </section>
+
+    <section class="layout">
+        <div class="col">
+            <div class="card">
+                <h2>@(editingId is null ? "Add transaction" : "Edit transaction")</h2>
+                <EditForm Model="form" OnValidSubmit="Save" class="form">
+                    <div class="type-toggle">
+                        <button type="button" class="@(form.Type == TransactionType.Expense ? "on" : "")" @onclick="() => SetType(TransactionType.Expense)">Expense</button>
+                        <button type="button" class="@(form.Type == TransactionType.Income ? "on" : "")" @onclick="() => SetType(TransactionType.Income)">Income</button>
+                    </div>
+                    <input class="desc" placeholder="Description (e.g. Superstore)" @bind="form.Description" />
+                    <input type="number" step="0.01" min="0" placeholder="Amount" @bind="form.Amount" />
+                    <select @bind="form.Category">
+                        @foreach (var c in form.Type == TransactionType.Expense ? Categories.Expense : Categories.Income)
+                        {
+                            <option value="@c">@c</option>
+                        }
+                    </select>
+                    <input type="date" @bind="form.Date" />
+                    <button type="submit" class="primary">@(editingId is null ? "Add" : "Save")</button>
+                    @if (editingId is not null)
+                    {
+                        <button type="button" @onclick="CancelEdit">Cancel</button>
+                    }
+                </EditForm>
+                @if (error is not null)
+                {
+                    <p class="error">@error</p>
+                }
+            </div>
+
+            <div class="card">
+                <div class="card-head">
+                    <h2>Transactions</h2>
+                    <div class="filters">
+                        <input placeholder="Search" @bind="searchText" @bind:event="oninput" />
+                        <select @bind="categoryFilter">
+                            <option value="">All categories</option>
+                            @foreach (var c in Categories.Expense.Concat(Categories.Income))
+                            {
+                                <option value="@c">@c</option>
+                            }
+                        </select>
+                    </div>
+                </div>
+                @{ var rows = Budget.Search(year, month, categoryFilter, searchText).ToList(); }
+                @if (rows.Count == 0)
+                {
+                    <p class="empty">No transactions this month.</p>
+                }
+                else
+                {
+                    <table>
+                        <tbody>
+                            @foreach (var t in rows)
+                            {
+                                <tr>
+                                    <td class="date">@t.Date.ToString("MMM d")</td>
+                                    <td>
+                                        @t.Description
+                                        <small>@t.Category</small>
+                                    </td>
+                                    <td class="amount @(t.Type == TransactionType.Income ? "pos" : "")">
+                                        @(t.Type == TransactionType.Income ? "+" : "−")@Money(t.Amount)
+                                    </td>
+                                    <td class="actions">
+                                        <button class="link" @onclick="() => StartEdit(t)">Edit</button>
+                                        <button class="link danger" @onclick="() => Delete(t.Id)">Delete</button>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                }
+                <div class="card-foot">
+                    <button @onclick="ExportCsv">Export CSV</button>
+                    <button class="link" @onclick="ResetDemo">Reset sample data</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="col">
+            <div class="card">
+                <h2>Budgets</h2>
+                @foreach (var s in spending.Where(s => s.Limit is not null))
+                {
+                    <div class="budget">
+                        <div class="budget-row">
+                            <span>@s.Category</span>
+                            <span class="@(s.OverBudget ? "neg" : "muted")">
+                                @Money(s.Spent) of
+                                <input class="limit" type="number" min="0" value="@s.Limit"
+                                       @onchange="e => UpdateBudget(s.Category, e.Value)" />
+                            </span>
+                        </div>
+                        <div class="bar"><div class="@BarClass(s)" style="width:@Math.Min(100, s.PercentUsed).ToString("0", CultureInfo.InvariantCulture)%"></div></div>
+                    </div>
+                }
+                <div class="add-budget">
+                    <select @bind="newBudgetCategory">
+                        @foreach (var c in Categories.Expense.Where(c => !Budget.Budgets.ContainsKey(c)))
+                        {
+                            <option value="@c">@c</option>
+                        }
+                    </select>
+                    <input type="number" min="0" placeholder="Monthly limit" @bind="newBudgetLimit" />
+                    <button @onclick="AddBudget">Add budget</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Where the money went</h2>
+                @if (summary.Expenses == 0)
+                {
+                    <p class="empty">No spending this month.</p>
+                }
+                else
+                {
+                    <div class="donut-wrap">
+                        <svg viewBox="0 0 42 42" class="donut">
+                            @{ double offset = 25; var i = 0; }
+                            @foreach (var s in spending.Where(s => s.Spent > 0))
+                            {
+                                var pct = (double)(s.Spent / summary.Expenses) * 100;
+                                <circle cx="21" cy="21" r="15.915" fill="transparent" stroke="@Palette[i % Palette.Length]" stroke-width="6"
+                                        stroke-dasharray="@($"{pct.ToString(CultureInfo.InvariantCulture)} {(100 - pct).ToString(CultureInfo.InvariantCulture)}")"
+                                        stroke-dashoffset="@offset.ToString(CultureInfo.InvariantCulture)"></circle>
+                                offset -= pct;
+                                i++;
+                            }
+                            <text x="21" y="20.5" text-anchor="middle" class="donut-total">@Money(summary.Expenses)</text>
+                            <text x="21" y="25" text-anchor="middle" class="donut-label">spent</text>
+                        </svg>
+                        <ul class="legend">
+                            @{ var j = 0; }
+                            @foreach (var s in spending.Where(s => s.Spent > 0))
+                            {
+                                <li><i style="background:@Palette[j++ % Palette.Length]"></i>@s.Category <b>@Money(s.Spent)</b></li>
+                            }
+                        </ul>
+                    </div>
+                }
+            </div>
+
+            <div class="card">
+                <h2>Last 6 months</h2>
+                @{ var max = history.Select(h => Math.Max(h.Income, h.Expenses)).DefaultIfEmpty(0).Max(); }
+                <div class="bars">
+                    @foreach (var h in history)
+                    {
+                        <div class="bar-group" title="@h.Label: income @Money(h.Income), spent @Money(h.Expenses)">
+                            <div class="pair">
+                                <div class="b income" style="height:@Pct(h.Income, max)%"></div>
+                                <div class="b expense" style="height:@Pct(h.Expenses, max)%"></div>
+                            </div>
+                            <span>@h.Label[..3]</span>
+                        </div>
+                    }
+                </div>
+                <div class="key"><span><i class="income"></i>Income</span><span><i class="expense"></i>Spent</span></div>
+            </div>
+        </div>
+    </section>
+</main>
+
+<footer>
+    Built with C# and Blazor WebAssembly · <a href="https://github.com/shucab-lane/budget-tracker">Source on GitHub</a> · Data is saved in your browser only
+</footer>
+
+@code {
+    private static readonly string[] Palette = ["#2b8a3e", "#1971c2", "#f08c00", "#c2255c", "#7048e8", "#0c8599", "#e8590c", "#5c940d", "#868e96", "#ae3ec9"];
+    private static readonly CultureInfo Cad = CultureInfo.GetCultureInfo("en-CA");
+
+    private int year = DateTime.Today.Year;
+    private int month = DateTime.Today.Month;
+    private MonthSummary summary = new(0, 1, 0, 0);
+    private List<CategorySpending> spending = [];
+    private List<MonthSummary> history = [];
+    private int overBudget;
+
+    private TransactionForm form = new();
+    private Guid? editingId;
+    private string? error;
+    private string searchText = "";
+    private string categoryFilter = "";
+    private string newBudgetCategory = "";
+    private decimal? newBudgetLimit;
+
+    private string MonthLabel => new DateTime(year, month, 1).ToString("MMMM yyyy");
+
+    private class TransactionForm
+    {
+        public string Description { get; set; } = "";
+        public decimal? Amount { get; set; }
+        public TransactionType Type { get; set; } = TransactionType.Expense;
+        public string Category { get; set; } = Categories.Expense[0];
+        public DateOnly Date { get; set; } = DateOnly.FromDateTime(DateTime.Today);
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!await Store.LoadInto(Budget))
+            Budget.Load(SampleData.Transactions(DateOnly.FromDateTime(DateTime.Today)), SampleData.Budgets());
+        Budget.Changed += OnChanged;
+        Refresh();
+    }
+
+    private async void OnChanged()
+    {
+        Refresh();
+        await Store.Save(Budget);
+    }
+
+    private void Refresh()
+    {
+        summary = Budget.Summary(year, month);
+        spending = Budget.SpendingByCategory(year, month);
+        history = Budget.History(year, month);
+        overBudget = spending.Count(s => s.OverBudget);
+        newBudgetCategory = Categories.Expense.FirstOrDefault(c => !Budget.Budgets.ContainsKey(c)) ?? "";
+        StateHasChanged();
+    }
+
+    private void ChangeMonth(int delta)
+    {
+        var d = new DateTime(year, month, 1).AddMonths(delta);
+        (year, month) = (d.Year, d.Month);
+        Refresh();
+    }
+
+    private void SetType(TransactionType type)
+    {
+        form.Type = type;
+        form.Category = type == TransactionType.Expense ? Categories.Expense[0] : Categories.Income[0];
+    }
+
+    private void Save()
+    {
+        error = null;
+        try
+        {
+            var t = new Transaction
+            {
+                Id = editingId ?? Guid.NewGuid(),
+                Description = form.Description.Trim(),
+                Amount = form.Amount ?? 0,
+                Type = form.Type,
+                Category = form.Category,
+                Date = form.Date,
+            };
+            if (editingId is null) Budget.Add(t);
+            else Budget.Update(t);
+            editingId = null;
+            form = new TransactionForm { Date = form.Date };
+        }
+        catch (ArgumentException ex)
+        {
+            error = ex.Message;
+        }
+    }
+
+    private void StartEdit(Transaction t)
+    {
+        editingId = t.Id;
+        error = null;
+        form = new TransactionForm { Description = t.Description, Amount = t.Amount, Type = t.Type, Category = t.Category, Date = t.Date };
+    }
+
+    private void CancelEdit()
+    {
+        editingId = null;
+        form = new TransactionForm();
+    }
+
+    private void Delete(Guid id)
+    {
+        if (editingId == id) CancelEdit();
+        Budget.Delete(id);
+    }
+
+    private void UpdateBudget(string category, object? value)
+    {
+        if (decimal.TryParse(value?.ToString(), NumberStyles.Number, CultureInfo.InvariantCulture, out var limit) && limit >= 0)
+            Budget.SetBudget(category, limit);
+    }
+
+    private void AddBudget()
+    {
+        if (string.IsNullOrEmpty(newBudgetCategory) || newBudgetLimit is not > 0) return;
+        Budget.SetBudget(newBudgetCategory, newBudgetLimit.Value);
+        newBudgetLimit = null;
+    }
+
+    private async Task ExportCsv() =>
+        await JS.InvokeVoidAsync("downloadFile", $"transactions-{year}-{month:00}.csv", Budget.ExportCsv(year, month));
+
+    private async Task ResetDemo()
+    {
+        await Store.Clear();
+        Budget.Load(SampleData.Transactions(DateOnly.FromDateTime(DateTime.Today)), SampleData.Budgets());
+        (year, month) = (DateTime.Today.Year, DateTime.Today.Month);
+        Refresh();
+    }
+
+    private static string Money(decimal value) => value.ToString("C0", Cad);
+
+    private static string Pct(decimal value, decimal max) =>
+        (max == 0 ? 0 : (double)(value / max) * 100).ToString("0.#", CultureInfo.InvariantCulture);
+
+    private static string BarClass(CategorySpending s) => s.OverBudget ? "fill over" : s.PercentUsed > 85 ? "fill warn" : "fill";
+
+    public void Dispose() => Budget.Changed -= OnChanged;
+}

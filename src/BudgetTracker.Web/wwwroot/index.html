@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Track income and spending, set monthly budgets by category, and see where your money goes. Built with C# and Blazor." />
+    <title>Budget Tracker</title>
+    <base href="/" />
+    <link rel="preload" id="webassembly" />
+    <link rel="stylesheet" href="css/app.css" />
+    <script type="importmap"></script>
+</head>
+<body>
+    <div id="app"><div class="loading">Loading…</div></div>
+    <div id="blazor-error-ui">
+        Something went wrong. <a href="." class="reload">Reload</a>
+    </div>
+    <script>
+        window.downloadFile = (name, text) => {
+            const url = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+            const a = Object.assign(document.createElement('a'), { href: url, download: name });
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+    </script>
+    <script src="_framework/blazor.webassembly#[.{fingerprint}].js"></script>
+</body>
+</html>
