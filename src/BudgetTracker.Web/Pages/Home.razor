@@ -41,7 +41,7 @@
     <section class="layout">
         <div class="col">
             <div class="card">
-                <h2>@(editingId is null ? "Add transaction" : "Edit transaction")</h2>
+                <h2>Add transaction</h2>
                 <EditForm Model="form" OnValidSubmit="Save" class="form">
                     <div class="type-toggle">
                         <button type="button" class="@(form.Type == TransactionType.Expense ? "on" : "")" @onclick="() => SetType(TransactionType.Expense)">Expense</button>
@@ -56,11 +56,7 @@
                         }
                     </select>
                     <input type="date" @bind="form.Date" />
-                    <button type="submit" class="primary">@(editingId is null ? "Add" : "Save")</button>
-                    @if (editingId is not null)
-                    {
-                        <button type="button" @onclick="CancelEdit">Cancel</button>
-                    }
+                    <button type="submit" class="primary">Add</button>
                 </EditForm>
                 @if (error is not null)
                 {
@@ -93,7 +89,32 @@
                         <tbody>
                             @foreach (var t in rows)
                             {
-                                <tr>
+                                if (editingId == t.Id)
+                                {
+                                    <tr @key="t.Id" class="editing">
+                                        <td colspan="4">
+                                            <div class="edit-row">
+                                                <input class="desc" @bind="editForm.Description" placeholder="Description" />
+                                                <input type="number" step="0.01" min="0" @bind="editForm.Amount" placeholder="Amount" />
+                                                <select @bind="editForm.Category">
+                                                    @foreach (var c in editForm.Type == TransactionType.Expense ? Categories.Expense : Categories.Income)
+                                                    {
+                                                        <option value="@c">@c</option>
+                                                    }
+                                                </select>
+                                                <input type="date" @bind="editForm.Date" />
+                                                <button class="primary" @onclick="SaveEdit">Save</button>
+                                                <button @onclick="CancelEdit">Cancel</button>
+                                            </div>
+                                            @if (editError is not null)
+                                            {
+                                                <p class="error">@editError</p>
+                                            }
+                                        </td>
+                                    </tr>
+                                    continue;
+                                }
+                                <tr @key="t.Id">
                                     <td class="date">@t.Date.ToString("MMM d")</td>
                                     <td>
                                         @t.Description
@@ -123,13 +144,13 @@
                 <h2>Budgets</h2>
                 @foreach (var s in spending.Where(s => s.Limit is not null))
                 {
-                    <div class="budget">
+                    <div class="budget" @key="s.Category">
                         <div class="budget-row">
                             <span>@s.Category</span>
                             <span class="@(s.OverBudget ? "neg" : "muted")">
-                                @Money(s.Spent) of
+                                @Money(s.Spent) of $
                                 <input class="limit" type="number" min="0" value="@s.Limit"
-                                       @onchange="e => UpdateBudget(s.Category, e.Value)" />
+                                       @oninput="e => UpdateBudget(s.Category, e.Value)" />
                             </span>
                         </div>
                         <div class="bar"><div class="@BarClass(s)" style="width:@Math.Min(100, s.PercentUsed).ToString("0", CultureInfo.InvariantCulture)%"></div></div>
@@ -218,8 +239,10 @@
     private int overBudget;
 
     private TransactionForm form = new();
+    private TransactionForm editForm = new();
     private Guid? editingId;
     private string? error;
+    private string? editError;
     private string searchText = "";
     private string categoryFilter = "";
     private string newBudgetCategory = "";
@@ -273,24 +296,23 @@
         form.Category = type == TransactionType.Expense ? Categories.Expense[0] : Categories.Income[0];
     }
 
+    private static Transaction ToTransaction(TransactionForm f, Guid id) => new()
+    {
+        Id = id,
+        Description = f.Description.Trim(),
+        Amount = f.Amount ?? 0,
+        Type = f.Type,
+        Category = f.Category,
+        Date = f.Date,
+    };
+
     private void Save()
     {
         error = null;
         try
         {
-            var t = new Transaction
-            {
-                Id = editingId ?? Guid.NewGuid(),
-                Description = form.Description.Trim(),
-                Amount = form.Amount ?? 0,
-                Type = form.Type,
-                Category = form.Category,
-                Date = form.Date,
-            };
-            if (editingId is null) Budget.Add(t);
-            else Budget.Update(t);
-            editingId = null;
-            form = new TransactionForm { Date = form.Date };
+            Budget.Add(ToTransaction(form, Guid.NewGuid()));
+            form = new TransactionForm { Date = form.Date, Type = form.Type, Category = form.Category };
         }
         catch (ArgumentException ex)
         {
@@ -301,14 +323,35 @@
     private void StartEdit(Transaction t)
     {
         editingId = t.Id;
-        error = null;
-        form = new TransactionForm { Description = t.Description, Amount = t.Amount, Type = t.Type, Category = t.Category, Date = t.Date };
+        editError = null;
+        editForm = new TransactionForm { Description = t.Description, Amount = t.Amount, Type = t.Type, Category = t.Category, Date = t.Date };
+    }
+
+    private void SaveEdit()
+    {
+        if (editingId is not Guid id) return;
+        editError = null;
+        try
+        {
+            Budget.Update(ToTransaction(editForm, id));
+            editingId = null;
+            // The edited date may be in another month; jump there so the change is visible
+            if (editForm.Date.Year != year || editForm.Date.Month != month)
+            {
+                (year, month) = (editForm.Date.Year, editForm.Date.Month);
+                Refresh();
+            }
+        }
+        catch (ArgumentException ex)
+        {
+            editError = ex.Message;
+        }
     }
 
     private void CancelEdit()
     {
         editingId = null;
-        form = new TransactionForm();
+        editError = null;
     }
 
     private void Delete(Guid id)
@@ -319,7 +362,8 @@
 
     private void UpdateBudget(string category, object? value)
     {
-        if (decimal.TryParse(value?.ToString(), NumberStyles.Number, CultureInfo.InvariantCulture, out var limit) && limit >= 0)
+        // Ignore blanks and zero while the user is still typing
+        if (decimal.TryParse(value?.ToString(), NumberStyles.Number, CultureInfo.InvariantCulture, out var limit) && limit > 0)
             Budget.SetBudget(category, limit);
     }
 
